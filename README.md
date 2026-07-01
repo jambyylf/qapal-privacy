@@ -1,0 +1,1 @@
+# Qapal Taxi — Privacy Policy
