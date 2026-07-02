@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="kk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Qapal Taxi — Сапарды бақылау</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root { --brand: #6C29F1; --brand-dark: #5B1FD4; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    #map { position: absolute; inset: 0; z-index: 1; }
+
+    .topbar {
+      position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
+      display: flex; align-items: center; gap: 8px;
+      padding: 12px 16px; background: var(--brand); color: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    .topbar .logo { font-weight: 800; font-size: 18px; }
+    .topbar .sub  { font-size: 12px; opacity: 0.85; margin-left: auto; }
+
+    .card {
+      position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 1000;
+      background: #fff; border-radius: 16px; padding: 14px 16px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+    }
+    .status { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; color: var(--brand); }
+    .status.dot::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #16A34A; display: inline-block; animation: pulse 1.4s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .driver { margin-top: 8px; font-size: 14px; color: #374151; }
+    .plate { display: inline-block; margin-top: 4px; background: #F3F0FF; color: var(--brand-dark); font-weight: 700; padding: 2px 10px; border-radius: 8px; letter-spacing: 0.5px; }
+    .muted { color: #6B7280; font-size: 13px; margin-top: 6px; }
+
+    .overlay {
+      position: absolute; inset: 0; z-index: 1500; background: #F9FAFB;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 24px; text-align: center; gap: 12px;
+    }
+    .overlay h2 { color: #111827; font-size: 20px; }
+    .overlay p  { color: #6B7280; font-size: 15px; max-width: 320px; }
+    .overlay .icon { font-size: 48px; }
+    .hidden { display: none !important; }
+
+    .leaflet-div-icon { background: transparent; border: none; }
+    .pin { width: 20px; height: 20px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+    .pin-from { background: #16A34A; }
+    .pin-to   { background: #DC2626; }
+    .pin-car  {
+      width: 40px; height: 40px; border-radius: 50%; background: var(--brand);
+      border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+      display: flex; align-items: center; justify-content: center; font-size: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo">🚕 Qapal Taxi</span>
+    <span class="sub">Сапарды бақылау</span>
+  </div>
+
+  <div id="map"></div>
+
+  <div class="card hidden" id="card">
+    <div class="status dot" id="status">Жүргізуші жолда</div>
+    <div class="driver" id="driver"></div>
+    <div class="muted" id="updated"></div>
+  </div>
+
+  <div class="overlay" id="overlay">
+    <div class="icon">⏳</div>
+    <h2 id="ovTitle">Жүктелуде…</h2>
+    <p id="ovText">Сапар мәліметі алынуда</p>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // ── Supabase параметрлері (публик — қауіпсіз) ──
+    var SUPABASE_URL = 'https://rzuhnhozixosrfkmclou.supabase.co';
+    var SUPABASE_KEY = 'sb_publishable_0eDbDp9g-qID_DsvkHXQXA_h5Ty7be4';
+
+    var params  = new URLSearchParams(location.search);
+    var orderId = params.get('order');
+
+    var map, fromMarker, toMarker, carMarker, fitted = false;
+
+    function initMap() {
+      map = L.map('map', { zoomControl: true, attributionControl: false })
+             .setView([45.176, 78.75], 13); // Қапал ауданы
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+    }
+
+    function icon(cls, inner) {
+      return L.divIcon({ className: '', html: '<div class="' + cls + '">' + (inner || '') + '</div>',
+                         iconSize: cls === 'pin-car' ? [40,40] : [20,20], iconAnchor: cls === 'pin-car' ? [20,20] : [10,10] });
+    }
+
+    function showOverlay(icon, title, text) {
+      document.getElementById('overlay').classList.remove('hidden');
+      document.querySelector('#overlay .icon').textContent = icon;
+      document.getElementById('ovTitle').textContent = title;
+      document.getElementById('ovText').textContent  = text;
+    }
+    function hideOverlay() { document.getElementById('overlay').classList.add('hidden'); }
+
+    function timeAgo(iso) {
+      if (!iso) return '';
+      var diff = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+      if (diff < 60) return diff + ' сек бұрын';
+      return Math.round(diff / 60) + ' мин бұрын';
+    }
+
+    async function poll() {
+      try {
+        var res = await fetch(SUPABASE_URL + '/rest/v1/rpc/get_shared_trip', {
+          method: 'POST',
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ p_order_id: orderId }),
+        });
+        var d = await res.json();
+
+        if (!d || d.found === false) { showOverlay('🔍', 'Сапар табылмады', 'Сілтеме қате болуы мүмкін.'); return; }
+        if (d.active === false) {
+          showOverlay('✅', 'Сапар аяқталды', 'Бұл сапар аяқталды немесе тоқтатылды.');
+          return;
+        }
+        hideOverlay();
+        document.getElementById('card').classList.remove('hidden');
+
+        // Маркерлер
+        if (d.from) {
+          var f = [d.from.lat, d.from.lng];
+          if (!fromMarker) fromMarker = L.marker(f, { icon: icon('pin pin-from') }).addTo(map);
+          else fromMarker.setLatLng(f);
+        }
+        if (d.to) {
+          var t = [d.to.lat, d.to.lng];
+          if (!toMarker) toMarker = L.marker(t, { icon: icon('pin pin-to') }).addTo(map);
+          else toMarker.setLatLng(t);
+        }
+        if (d.driver_location) {
+          var c = [d.driver_location.lat, d.driver_location.lng];
+          if (!carMarker) carMarker = L.marker(c, { icon: icon('pin-car', '🚗'), zIndexOffset: 1000 }).addTo(map);
+          else carMarker.setLatLng(c);
+          document.getElementById('updated').textContent = 'Жаңартылды: ' + timeAgo(d.driver_location.updated_at);
+        }
+
+        // Бірінші рет — бәрін сыйдыру
+        if (!fitted) {
+          var pts = [];
+          if (d.driver_location) pts.push([d.driver_location.lat, d.driver_location.lng]);
+          if (d.to) pts.push([d.to.lat, d.to.lng]);
+          if (d.from) pts.push([d.from.lat, d.from.lng]);
+          if (pts.length > 1) { map.fitBounds(pts, { padding: [60, 60] }); fitted = true; }
+          else if (pts.length === 1) { map.setView(pts[0], 15); fitted = true; }
+        }
+
+        // Статус + жүргізуші
+        document.getElementById('status').textContent =
+          d.status === 'in_progress' ? 'Сапар жолда' : 'Жүргізуші келе жатыр';
+        if (d.driver) {
+          document.getElementById('driver').innerHTML =
+            '👤 ' + (d.driver.name || 'Жүргізуші') + '<br>🚗 ' + (d.driver.car || '') +
+            (d.driver.plate ? '<br><span class="plate">' + d.driver.plate + '</span>' : '');
+        }
+      } catch (e) {
+        // Желі қатесі — келесі polling-те қайталанады
+      }
+    }
+
+    if (!orderId) {
+      initMap();
+      showOverlay('🔗', 'Сілтеме толық емес', 'Сапар сілтемесі дұрыс емес.');
+    } else {
+      initMap();
+      poll();
+      setInterval(poll, 5000);
+    }
+  </script>
+</body>
+</html>
